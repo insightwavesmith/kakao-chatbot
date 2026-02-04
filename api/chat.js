@@ -1,11 +1,11 @@
-const { createClient } = require('@supabase/supabase-js');
+// 카카오 오픈빌더 스킬 API - 강의 내용 기반 RAG 챗봇
+// POST /api/chat
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
-
+// 카카오 스킬 응답 포맷
 function kakaoResponse(text) {
   return {
     version: '2.0',
@@ -15,6 +15,7 @@ function kakaoResponse(text) {
   };
 }
 
+// Gemini 임베딩 생성
 async function getEmbedding(text) {
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=${GEMINI_API_KEY}`,
@@ -35,15 +36,31 @@ async function getEmbedding(text) {
   return data.embedding.values;
 }
 
+// Supabase 벡터 검색 (raw fetch - SDK 불필요)
 async function searchChunks(embedding) {
-  const { data, error } = await supabase.rpc('search_lecture_chunks', {
-    query_embedding: embedding,
-    match_count: 5,
-  });
-  if (error) throw new Error(`Supabase RPC error: ${error.message}`);
-  return data || [];
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/rpc/search_lecture_chunks`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        apikey: SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+      },
+      body: JSON.stringify({
+        query_embedding: embedding,
+        match_count: 5,
+      }),
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Supabase RPC error: ${res.status} ${err}`);
+  }
+  return res.json();
 }
 
+// Gemini 답변 생성
 async function generateAnswer(question, chunks) {
   const context = chunks
     .map((c, i) => `[${i + 1}] ${c.content}`)
@@ -60,11 +77,7 @@ async function generateAnswer(question, chunks) {
 - 강의 내용에 없는 질문이면 솔직하게 "해당 질문과 관련된 강의 내용을 찾지 못했습니다. 보다 정확한 답변을 위해 질문을 구체적으로 남겨주시면 강사님이 직접 답변드리겠습니다." 라고 안내
 - 답변은 카카오톡 메시지에 적합한 길이로 (너무 길지 않게)`;
 
-  const userPrompt = `[강의 내용]
-${context}
-
-[수강생 질문]
-${question}`;
+  const userPrompt = `[강의 내용]\n${context}\n\n[수강생 질문]\n${question}`;
 
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${GEMINI_API_KEY}`,
@@ -95,6 +108,7 @@ ${question}`;
   return candidate.content.parts[0].text;
 }
 
+// 메인 핸들러
 module.exports = async function handler(req, res) {
   // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -125,7 +139,7 @@ module.exports = async function handler(req, res) {
     const chunks = await searchChunks(embedding);
     console.log('[chat] chunks found:', chunks.length);
 
-    if (chunks.length === 0) {
+    if (!chunks || chunks.length === 0) {
       return res.status(200).json(
         kakaoResponse('해당 질문과 관련된 강의 내용을 찾지 못했습니다. 보다 정확한 답변을 위해 질문을 구체적으로 남겨주시면 강사님이 직접 답변드리겠습니다.')
       );
