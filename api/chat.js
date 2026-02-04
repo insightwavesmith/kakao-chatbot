@@ -1,164 +1,145 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import { createClient } from '@supabase/supabase-js';
+const { createClient } = require('@supabase/supabase-js');
 
-// 환경변수 확인
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
-// 클라이언트 초기화
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
-// 임베딩 모델
-const embeddingModel = genAI.getGenerativeModel({ model: "text-embedding-004" });
-
-// 답변 생성 모델
-const chatModel = genAI.getGenerativeModel({ model: "gemini-2.5-flash-preview-05-20" });
-
-// 카카오 스킬 응답 포맷
-function createKakaoResponse(text) {
+function kakaoResponse(text) {
   return {
-    version: "2.0",
+    version: '2.0',
     template: {
-      outputs: [
-        {
-          simpleText: {
-            text: text
-          }
-        }
-      ]
-    }
+      outputs: [{ simpleText: { text } }],
+    },
   };
 }
 
-// 에러 응답
-function createErrorResponse() {
-  return createKakaoResponse("죄송합니다, 잠시 후 다시 시도해주세요.");
-}
-
-// 임베딩 생성
-async function generateEmbedding(text) {
-  try {
-    const result = await embeddingModel.embedContent(text);
-    return result.embedding.values;
-  } catch (error) {
-    console.error('임베딩 생성 에러:', error);
-    throw error;
-  }
-}
-
-// 벡터 검색
-async function searchLectureChunks(embedding) {
-  try {
-    const { data, error } = await supabase.rpc('search_lecture_chunks', {
-      query_embedding: embedding,
-      match_threshold: 0.7,
-      match_count: 5
-    });
-
-    if (error) {
-      console.error('벡터 검색 에러:', error);
-      throw error;
+async function getEmbedding(text) {
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=${GEMINI_API_KEY}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'models/text-embedding-004',
+        content: { parts: [{ text }] },
+      }),
     }
-
-    return data || [];
-  } catch (error) {
-    console.error('Supabase 검색 에러:', error);
-    throw error;
+  );
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Embedding API error: ${res.status} ${err}`);
   }
+  const data = await res.json();
+  return data.embedding.values;
 }
 
-// 답변 생성
-async function generateAnswer(question, context) {
-  try {
-    const contextText = context.map(chunk => chunk.content).join('\n\n');
-    
-    const prompt = `당신은 자사몰사관학교의 메타 광고 전문가입니다. 아래 강의 내용을 바탕으로 질문에 답변해주세요.
+async function searchChunks(embedding) {
+  const { data, error } = await supabase.rpc('search_lecture_chunks', {
+    query_embedding: embedding,
+    match_count: 5,
+  });
+  if (error) throw new Error(`Supabase RPC error: ${error.message}`);
+  return data || [];
+}
 
-강의 내용:
-${contextText}
+async function generateAnswer(question, chunks) {
+  const context = chunks
+    .map((c, i) => `[${i + 1}] ${c.content}`)
+    .join('\n\n');
 
-질문: ${question}
+  const systemPrompt = `당신은 "자사몰사관학교"의 메타 광고 전문 교육 AI 어시스턴트입니다.
+
+아래 강의 내용을 기반으로 수강생의 질문에 답변하세요.
 
 답변 원칙:
-- 한국어로 존댓말을 사용하세요
-- 친절하지만 간결하게 답변하세요
-- 강의 내용에서 찾을 수 없는 정보는 "관련 내용을 찾지 못했습니다"라고 솔직히 말하세요
-- 실용적이고 구체적인 조언을 제공하세요
-- 추상적인 조언은 피하세요
-- 자사몰사관학교의 메타 광고 전문 지식을 기반으로 답변하세요
+- 한국어, 존댓말 사용
+- 친절하지만 간결하게 답변
+- 실용적이고 구체적으로 답변 (추상적 조언 X)
+- 강의 내용에 없는 질문이면 솔직하게 "해당 질문과 관련된 강의 내용을 찾지 못했습니다. 보다 정확한 답변을 위해 질문을 구체적으로 남겨주시면 강사님이 직접 답변드리겠습니다." 라고 안내
+- 답변은 카카오톡 메시지에 적합한 길이로 (너무 길지 않게)`;
 
-답변:`;
+  const userPrompt = `[강의 내용]
+${context}
 
-    const result = await chatModel.generateContent(prompt);
-    return result.response.text();
-  } catch (error) {
-    console.error('답변 생성 에러:', error);
-    throw error;
+[수강생 질문]
+${question}`;
+
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${GEMINI_API_KEY}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        generationConfig: {
+          temperature: 0.3,
+          maxOutputTokens: 1024,
+        },
+      }),
+    }
+  );
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Gemini API error: ${res.status} ${err}`);
   }
+
+  const data = await res.json();
+  const candidate = data.candidates?.[0];
+  if (!candidate?.content?.parts?.[0]?.text) {
+    throw new Error('No response from Gemini');
+  }
+  return candidate.content.parts[0].text;
 }
 
-// 메인 핸들러
-export default async function handler(req, res) {
-  // POST 메서드만 허용
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
-
-  // CORS 헤더 설정
+module.exports = async function handler(req, res) {
+  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
+  if (req.method !== 'POST') {
+    return res.status(405).json(kakaoResponse('Method not allowed'));
+  }
+
   try {
-    // 요청 파싱
-    const { userRequest } = req.body;
-    
-    if (!userRequest || !userRequest.utterance) {
-      return res.status(400).json(createErrorResponse());
+    const utterance = req.body?.userRequest?.utterance;
+    if (!utterance || utterance.trim().length === 0) {
+      return res.status(200).json(kakaoResponse('질문을 입력해 주세요.'));
     }
 
-    const question = userRequest.utterance.trim();
-    
-    // 빈 질문 체크
-    if (!question) {
-      return res.json(createKakaoResponse("질문을 입력해주세요."));
-    }
+    console.log('[chat] question:', utterance);
 
-    console.log(`질문 받음: ${question}`);
-
-    // RAG 파이프라인 실행
     // 1. 임베딩 생성
-    const embedding = await generateEmbedding(question);
-    console.log('임베딩 생성 완료');
+    const embedding = await getEmbedding(utterance);
+    console.log('[chat] embedding done, dim:', embedding.length);
 
     // 2. 벡터 검색
-    const searchResults = await searchLectureChunks(embedding);
-    console.log(`벡터 검색 완료: ${searchResults.length}개 결과`);
+    const chunks = await searchChunks(embedding);
+    console.log('[chat] chunks found:', chunks.length);
 
-    // 3. 답변 생성
-    if (searchResults.length === 0) {
-      return res.json(createKakaoResponse("관련된 강의 내용을 찾지 못했습니다. 다른 질문을 시도해보세요."));
+    if (chunks.length === 0) {
+      return res.status(200).json(
+        kakaoResponse('해당 질문과 관련된 강의 내용을 찾지 못했습니다. 보다 정확한 답변을 위해 질문을 구체적으로 남겨주시면 강사님이 직접 답변드리겠습니다.')
+      );
     }
 
-    const answer = await generateAnswer(question, searchResults);
-    console.log('답변 생성 완료');
+    // 3. Gemini로 답변 생성
+    const answer = await generateAnswer(utterance, chunks);
+    console.log('[chat] answer generated, length:', answer.length);
 
-    // 카카오 스킬 응답 반환
-    return res.json(createKakaoResponse(answer));
-
-  } catch (error) {
-    console.error('API 에러:', error);
-    return res.status(500).json(createErrorResponse());
+    return res.status(200).json(kakaoResponse(answer));
+  } catch (err) {
+    console.error('[chat] Error:', err.message);
+    return res
+      .status(200)
+      .json(kakaoResponse('죄송합니다, 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.'));
   }
-}
-
-// OPTIONS 요청 처리 (CORS preflight)
-export const config = {
-  api: {
-    bodyParser: {
-      sizeLimit: '1mb',
-    },
-  },
 };
