@@ -1,0 +1,9 @@
+{
+  "name": "kakao-chatbot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "카카오 오픈빌더 스킬 API - 강의 내용 기반 RAG 챗봇",
+  "engines": {
+    "node": ">=18"
+  }
+}
