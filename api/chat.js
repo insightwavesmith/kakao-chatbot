@@ -67,7 +67,7 @@ async function generateAnswer(question, chunks) {
   const context = chunks
     .map(
       (c, i) =>
-        `[${i + 1}] ${c.lecture_title ? `(${c.lecture_title}) ` : ""}${c.content}`
+        `[${i + 1}] ${c.source_file ? `(${c.source_file}) ` : ""}${c.content}`
     )
     .join("\n\n");
 
@@ -85,7 +85,7 @@ async function generateAnswer(question, chunks) {
 ## 참고 강의 내용
 ${context}`;
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${GEMINI_API_KEY}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -151,7 +151,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json(kakaoResponse(answer));
   } catch (error) {
-    console.error("Error:", error.message);
+    console.error("Error:", error.message, error.stack);
     return res
       .status(200)
       .json(kakaoResponse("죄송합니다, 잠시 후 다시 시도해주세요."));
